@@ -19,6 +19,7 @@
 ##########################################################
 
 library(tidyverse)
+library(lubridate)
 library(np)
 library(sp)
 library(metR)
@@ -28,92 +29,122 @@ library(shinythemes)
 library(RColorBrewer)
 library(plotly)
 
-totaldat <- readRDS("all_mlb.RDS")
-totalwobareg <- readRDS("gridwobafull.RDS")
+totaldat <- readRDS("data/all_mlb.RDS")
+totalwobareg <- readRDS("data/gridwobafull.RDS")
 totalwobareg2d <-
   lapply(as.character(2017:2020), function(x) {
-    readRDS(sprintf("gridwobafull2d_%s.RDS", x))
+    readRDS(sprintf("data/gridwobafull2d_%s.RDS", x))
   })
 names(totalwobareg2d) <- 2017:2020
-totaldensreg <- readRDS("griddensfull.RDS")
+totaldensreg <- readRDS("data/griddensfull.RDS")
 totaldensreg2d <-
   lapply(as.character(2017:2020), function(x) {
-    readRDS(sprintf("griddensfull2d_%s.RDS", x))
+    readRDS(sprintf("data/griddensfull2d_%s.RDS", x))
   })
 names(totaldensreg2d) <- 2017:2020
-totalgrid <- readRDS("gridfull.RDS")
+totalgrid <- readRDS("data/gridfull.RDS")
 totalgrid2d <-
   lapply(as.character(2017:2020), function(x) {
-    readRDS(sprintf("gridfull2d_%s.RDS", x))
+    readRDS(sprintf("data/gridfull2d_%s.RDS", x))
   })
 names(totalgrid2d) <- 2017:2020
 
+teamids <- totaldat$home_team %>% unique() %>% sort()
 
 
-totalwobadens <-
-  totalgrid %>% mutate(wOBABIP = totalwobareg$mean, density = totaldensreg$dens)
-totalwobadens2d <-
-  lapply(as.character(2017:2020), function(x) {
-    data.frame(get(x, totalgrid2d)) %>% mutate(
-      wOBABIP = get(x, totalwobareg2d)$mean,
-      density = get(x, totaldensreg2d)$dens
+
+totalwobadens <- totalgrid %>%
+  mutate(wOBABIP = totalwobareg$mean, density = totaldensreg$dens)
+totalwobadens2d <- map(as.character(2017:2020), ~{
+  data.frame(get(.x, totalgrid2d)) %>% mutate(
+    wOBABIP = get(.x, totalwobareg2d)$mean,
+    density = get(.x, totaldensreg2d)$dens
     )
   })
 names(totalwobadens2d) <- 2017:2020
 
-calcTeamWoba <- function (team, awayOnly, year, fieldPosition) {
-  subset <- totaldat %>%
-    filter(lubridate::year(game_date) == year)
+
+
+calcTeamWoba <- function (team, awayOnly, year, fieldPosition, difference) {
+  away <- ifelse(awayOnly, "away", "all")
   
-  if (fieldPosition == "hitting") {
-    subset <- subset %>% filter(hitting_team == team)
+  if(!difference) {
+    teamfile <- readRDS(str_glue("data/reg2d_{team}_{fieldPosition}_{away}_{year}.RDS"))
+    teamfile$reg <- teamfile$reg %>% rename(wOBABIP = mean, density = dens)
+    list(teamfile$reg, teamfile$n)
+    
   } else {
-    subset <- subset %>% filter(fielding_team == team)
+    allfile <- map(teamids, ~readRDS(str_glue("data/reg2d_{.x}_{fieldPosition}_{away}_{year}.RDS")))
+    teamfile <- allfile[[match(team, teamids)]]
+    
+    regs <- bind_rows(map(allfile, ~.x$reg %>% mutate(n = .x$n))) %>%
+      group_by(launch_angle, launch_speed) %>%
+      summarize(mean = weighted.mean(mean, dens),
+                dens = weighted.mean(dens, n)) %>%
+      ungroup()
+    
+    diffreg <- inner_join(teamfile$reg, regs, by = c("launch_angle", "launch_speed")) %>%
+      mutate(wOBABIP = mean.x - mean.y,
+             density = dens.x - dens.y)
+    
+    list(diffreg, teamfile$n)
   }
-  
-  if (awayOnly) {
-    subset <- subset %>% filter(away_team == team)
-  }
-  
-  txdat <-
-    data.frame(x = subset$launch_angle,
-               y = subset$launch_speed)
-  
-  totalgrid <- get(as.character(year), totalgrid2d)
-  
-  hull <- convhulln(as.matrix(txdat))
-  grid_inhull <-
-    totalgrid[inhulln(hull, as.matrix(totalgrid)), ]
-  
-  reg <- npreg(
-    bws = c(5, 40),
-    bwtype = "adaptive_nn",
-    exdat = grid_inhull,
-    txdat = txdat,
-    tydat = as.numeric(subset$woba_value)
-  )
-  
-  density <- grid_inhull %>%
-    map(~ {
-      attributes(.x) <- NULL
-      .x
-    }) %>%
-    as.data.frame() %>%
-    npudens(
-      bws = c(5, 40),
-      bwtype = "adaptive_nn",
-      edat = .,
-      tdat = txdat
-    )
-  
-  out <-
-    grid_inhull %>% mutate(wOBABIP = reg$mean, density = density$dens)
-  
-  return(list(out, length(subset[[1]])))
+  # 
+  # subset <- totaldat %>%
+  #   filter(year(game_date) == year)
+  # 
+  # if (fieldPosition == "hitting") {
+  #   subset <- subset %>% filter(hitting_team == team)
+  # } else {
+  #   subset <- subset %>% filter(fielding_team == team)
+  # }
+  # 
+  # if (awayOnly) {
+  #   subset <- subset %>% filter(away_team == team)
+  # }
+  # 
+  # txdat <-
+  #   data.frame(x = subset$launch_angle,
+  #              y = subset$launch_speed)
+  # 
+  # totalgrid <- get(as.character(year), totalgrid2d)
+  # 
+  # hull <- convhulln(as.matrix(txdat))
+  # grid_inhull <-
+  #   totalgrid[inhulln(hull, as.matrix(totalgrid)), ]
+  # 
+  # reg <- npreg(
+  #   bws = c(5, 40),
+  #   bwtype = "adaptive_nn",
+  #   exdat = grid_inhull,
+  #   txdat = txdat,
+  #   tydat = as.numeric(subset$woba_value)
+  # )
+  # 
+  # density <- grid_inhull %>%
+  #   map(~ {
+  #     attributes(.x) <- NULL
+  #     .x
+  #   }) %>%
+  #   as.data.frame() %>%
+  #   npudens(
+  #     bws = c(5, 40),
+  #     bwtype = "adaptive_nn",
+  #     edat = .,
+  #     tdat = txdat
+  #   )
+  # 
+  # out <-
+  #   grid_inhull %>% mutate(wOBABIP = reg$mean, density = density$dens)
+  # 
+  # return(list(out, length(subset[[1]])))
 }
 
 
-plotWobaMargin <- function (dat, n) {
+plotWobaMargin <- function (l) {
+  dat <- l[[1]]
+  n <- l[[2]]
+  
   breaks <- seq(0, 2, length.out = 9)
   dims <- names(dat)[1:2] %>%
     map(~case_when(
@@ -172,20 +203,11 @@ plotWobaMargin <- function (dat, n) {
     )
 }
 
-plotWobaTeam <- function (dat, difference, n, year) {
+plotWobaTeam <- function (l, difference) {
+  dat <- l[[1]]
+  n <- l[[2]]
+  
   if (difference) {
-    wobadens <- get(as.character(year), totalwobadens2d)
-    
-    dat <- dat %>%
-      inner_join(
-        wobadens,
-        by = c("launch_angle", "launch_speed"),
-        suffix = c("x", "y")
-      ) %>%
-      mutate(wOBABIP = wOBABIPx - wOBABIPy,
-             density = densityx - densityy)
-    
-    
     colorpal = brewer.pal(11, "PiYG")
     breaks = seq(-.5, .5, length.out = 11)
   } else {
@@ -258,7 +280,7 @@ ui <- fluidPage(theme = shinytheme("lumen"),
                                selectInput(
                                  inputId = "team",
                                  label = "Team",
-                                 choices = levels(as.factor(totaldat$away_team))
+                                 choices = teamids
                                ),
                                selectInput(
                                  inputId = "fieldposition",
@@ -291,10 +313,14 @@ server <- function(input, output, session) {
   # Subset and average data
   wobamarginalized <- reactive({
     req(input$dim, input$range)
+    n <- totaldat %>%
+      filter_at(input$dim, ~.x >= input$range[1] & .x <= input$range[2]) %>%
+      {length(.[[1]])}
     totalwobadens %>%
       filter_at(input$dim, ~.x >= input$range[1] & .x <= input$range[2]) %>%
       group_by_at(dims()) %>%
-      summarize(wOBABIP = weighted.mean(wOBABIP, density))
+      summarize(wOBABIP = weighted.mean(wOBABIP, density)) %>%
+      list(., n)
   })
   
   wobateam <- reactive({
@@ -304,7 +330,8 @@ server <- function(input, output, session) {
     calcTeamWoba(input$team,
                  input$awayonly,
                  input$year,
-                 input$fieldposition)
+                 input$fieldposition,
+                 input$difference)
   })
   
   observe({
@@ -320,29 +347,14 @@ server <- function(input, output, session) {
   
   output$wobaplotfull <- renderPlot({
     plotWobaMargin(
-      wobamarginalized(),
-      length(totaldat[[1]])
+      wobamarginalized()
     )
   })
   
   output$wobaplotteam <- renderPlot({
-    plotWobaTeam(wobateam()[[1]],
-                 input$difference,
-                 wobateam()[[2]],
-                 input$year)
+    plotWobaTeam(wobateam(),
+                 input$difference)
   })
 }
 
 shinyApp(ui = ui, server = server)
-
-# all2d <- lapply(levels(as.factor(totaldat$fielding_team)), FUN = function(team) {calcTeamWoba(team, FALSE, 2017, "fielding")})
-# 
-# all2ddelist <- lapply(all2d, FUN = function(x) {x[[1]]})
-# 
-# all2davg <- all2ddelist %>%
-#   bind_rows() %>%
-#   group_by(launch_speed, launch_angle) %>%
-#   summarize(wOBABIP = weighted.mean(wOBABIP, density), density = weighted.mean(density, density))
-# 
-# plotWobaTeam(all2davg, TRUE, 0, 2017)
-# plotWobaTeam(get("2017", totalwobadens2d), TRUE, 0, 2017)

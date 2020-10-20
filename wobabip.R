@@ -19,6 +19,7 @@
 
 
 library(tidyverse)
+library(lubridate)
 library(baseballr)
 library(np)
 library(sp)
@@ -34,14 +35,12 @@ ftime <- function(f) {
   }
 }
 
-ftime(function() for(i in 1:(10**8)) {x <- 1 + 1})()
-
 # Collect Statcast data
 
 # Pull initial Statcast data in chunks of 3 days, store in current working directory as "all_mlb.RDS"
-if (!"all_mlb.RDS" %in% dir()) {
+if (!"all_mlb.RDS" %in% dir("data")) {
   rawdat <- data.frame()
-  for (dates in seq(lubridate::as_date("2017-01-01"), Sys.Date(), 3)) {
+  for (dates in seq(as_date("2017-01-01"), Sys.Date(), 3)) {
     tdat <- scrape_statcast_savant(dates, dates + 2) %>%
       mutate_at("game_type", as.character)
     if (length(tdat[[1]]) != 0) {
@@ -51,11 +50,11 @@ if (!"all_mlb.RDS" %in% dir()) {
   
   # Read data from "all_mlb.RDS", remove last day of data, then update
 } else {
-  rawdat <- readRDS("all_mlb.RDS") %>%
+  rawdat <- readRDS("data/all_mlb.RDS") %>%
     filter(game_date < Sys.Date() - 1)
   for (dates in seq(max(rawdat$game_date), Sys.Date(), by = "days")) {
     tdat <-
-      lubridate::as_date(dates) %>%
+      as_date(dates) %>%
       scrape_statcast_savant(., .) %>%
       mutate_at("game_type", as.character)
     if (length(tdat[[1]]) != 0) {
@@ -86,7 +85,7 @@ rawdat <- rawdat %>%
              inning_topbot == "Bot" ~ home_team
            ))
 
-saveRDS(rawdat, "all_mlb.RDS")
+saveRDS(rawdat, "data/all_mlb.RDS")
 
 # Used for exploration only
 calcWobaBandwidths <- ftime(function(n) {
@@ -189,7 +188,7 @@ txdat <-
 # Remove grid coordinates that fall outside of convex hull
 hull <- convhulln(as.matrix(txdat))
 grid_inhull <- grid[inhulln(hull, as.matrix(grid)),]
-saveRDS(grid_inhull, "gridfull.RDS")
+saveRDS(grid_inhull, "data/gridfull.RDS")
 
 # Calculate mean wOBA at each grid coordinate
 calcGridWobaFull <- ftime(function(grid) {
@@ -205,7 +204,7 @@ calcGridWobaFull <- ftime(function(grid) {
 gridwobafull <- calcGridWobaFull(grid_inhull)
 out <- list(gridwobafull$mean, gridwobafull$ntrain)
 names(out) <- c("mean", "n")
-saveRDS(out, "gridwobafull.RDS")
+saveRDS(out, "data/gridwobafull.RDS")
 
 
 
@@ -228,11 +227,11 @@ calcGridDensFull <- ftime(function(grid) {
 griddens <- calcGridDensFull(grid_inhull)
 out <- list(griddens$dens, griddens$ntrain)
 names(out) <- c("dens", "n")
-saveRDS(out, "griddensfull.RDS")
+saveRDS(out, "data/griddensfull.RDS")
 
 
 
-calcWobaDens2d <- function(year, team, position) {
+calcWobaDens2d <- function(team, position, away, year) {
   subset <- dat %>%
     filter(lubridate::year(game_date) == year)
   if(position == "hitting") {
@@ -241,17 +240,19 @@ calcWobaDens2d <- function(year, team, position) {
     subset <- subset %>% filter(fielding_team == team)
   }
   
+  if(away == "away") {
+    subset <- subset %>% filter(away_team == team)
+  }
+  
   txdat2d <- data.frame(x = subset$launch_angle,
                         y = subset$launch_speed)
   
   # Remove grid coordinates that fall outside of convex hull
   hull2d <- convhulln(as.matrix(txdat2d))
   grid_inhull2d <- grid2d[inhulln(hull2d, as.matrix(grid2d)),]
-  saveRDS(grid_inhull2d, str_glue("gridfull2d_{team}_{position}_{year}.RDS"))
-  
   
   # Calculate mean wOBA at each grid coordinate
-  print(str_glue("Calculating mean wOBA 2D for {team} {position} in {year}"))
+  print(str_glue("Calculating mean wOBA 2D for {team} {position} in {away} games in {year}"))
   gridwoba2d <- ftime(function() npreg(
     bws = c(5, 40),
     bwtype = "adaptive_nn",
@@ -259,12 +260,9 @@ calcWobaDens2d <- function(year, team, position) {
     txdat = txdat2d,
     tydat = as.numeric(subset$woba_value)
   ))()
-  out <- list(gridwoba2d$mean, gridwoba2d$ntrain)
-  names(out) <- c("mean", "n")
-  saveRDS(out, str_glue("gridwobafull2d_{team}_{position}_{year}.RDS"))
   
   # Calculate density of observations at each grid coordinate
-  print(str_glue("Calculating density 2D for {team} {position} in {year}"))
+  print(str_glue("Calculating density 2D for {team} {position} in {away} games in {year}"))
   griddens <- ftime(function() grid_inhull2d %>%
                       map( ~ {
                         attributes(.x) <- NULL
@@ -277,15 +275,20 @@ calcWobaDens2d <- function(year, team, position) {
                         edat = .,
                         tdat = txdat2d
                       ))()
-  out <- list(griddens$dens, griddens$ntrain)
-  names(out) <- c("dens", "n")
-  saveRDS(out, str_glue("griddensfull2d_{team}_{position}_{year}.RDS"))
+  out <- list(bind_cols(grid_inhull2d,
+                        mean = gridwoba2d$mean,
+                        dens = griddens$dens),
+              gridwoba2d$ntrain)
+  names(out) <- c("reg", "n")
+  saveRDS(out, str_glue("data/reg2d_{team}_{position}_{away}_{year}.RDS"))
 }
 
-walk(dat %>% distinct(lubridate::year(game_date)) %>% pull(), function(year){
-  walk(dat %>% distinct(hitting_team) %>% pull(), function(team) {
-    walk(c("hitting", "fielding"), function(position) {
-      calcWobaDens2d(year, team, position)
+walk(dat %>% distinct(year(game_date)) %>% pull(), function(year){
+  walk(dat$hitting_team %>% unique() %>% sort(), function(team) {
+    walk(c("away", "all"), function(away) {
+      walk(c("hitting", "fielding"), function(position) {
+        calcWobaDens2d(team, position, away, year)
+      })
     })
   })
 })
